@@ -16,22 +16,28 @@ import mlrose
 
 np.seterr(over='ignore') #ignore overflow in exponent warnings
 
-#general params:
-#plotting
-
-PLOT_ACTION = 'save' # (None, 'save', 'show') - default to None to avoid issues with matplotlib depending on OS TODO: set to None
-PLOT_BATCH_LC = True #this will be overwritten if PLOT_ACTION is "None"
-ITERATION_OUTPUT = True # True or False, to print updates as each algorithm is iterating TODO: set to False
+np.random.seed(27)
+#general params - plotting and stdout
+PLOT_ACTION = None # (None, 'save', 'show') - default to None to avoid issues with matplotlib depending on OS TODO: set to None
+PLOT_BATCH_LC = False #this will be overwritten if PLOT_ACTION is "None"
+ITERATION_OUTPUT = False # True or False, to print updates as each algorithm is iterating TODO: set to False
+OUTPUT_CSV = False # true or false to write CSV with summaries. If True, must have write access to local directory
 
 # randomized optimization for neural network params
-N_RESTARTS = 10 # number of random restarts to do with randomized hill climbing.
+N_RESTARTS = 3 # number of random restarts to do with randomized hill climbing.
 IMPROVEMENT_TOLERANCE = 0.00001 #this helps determine if convergence has happened
+N_MAX_ITER = 500
+N_MAX_ATTEMPTS = 50
+
+# randomized optimization for discrete optimization problems
+DO_MAX_ITER = 10000
+DO_MAX_ATTEMPTS = 20 
 
 #dataset handling and cleaning
 USE_DATASET = 'aps' #one of ('spam', 'aps')
 BALANCE_METHOD = 'downsample' # (int, 'downsample' or 'upsample') #downsample to balance classes
-N_LC_CHUNKS = 5 #number of chunks for learning curve data segmentation
-N_CV = 0.2 # percentage to use as validation
+N_LC_CHUNKS = 3 #number of chunks for learning curve data segmentation, if PLOT_BATCH_LC = True
+N_CV = 0.2 # percentage to use as validation in learning curve, if PLOT_BATCH_LC = True
 
 # FULL DISCLOSURE, THESE MONKEY-PATCHED METHODS ARE DIRECTLY STOLEN FROM mlrose: https://github.com/gkhayes/mlrose
 # (a dependency of this project), with some modifications to algorithms and neural network fitting, along with tracking information for each algorithm. 
@@ -139,7 +145,7 @@ def random_hill_climb(problem, max_attempts=10, max_iters=np.inf, restarts=10,
     fitness_list = []
     func_eval_count = 0
     print('\nworking on: RHC')
-
+    
     for i in range(restarts + 1):
         
         # Initialize optimization problem and attempts counter
@@ -150,8 +156,8 @@ def random_hill_climb(problem, max_attempts=10, max_iters=np.inf, restarts=10,
 
         attempts = 0
         iters = 0
-
-        while (attempts < max_attempts) and (iters < max_iters):
+        no_improve_iters = 0
+        while (attempts < max_attempts) and (iters < max_iters) and (no_improve_iters < max_attempts):
             iters += 1
             # Find random neighbor and evaluate fitness
             next_state = problem.random_neighbor()
@@ -162,7 +168,13 @@ def random_hill_climb(problem, max_attempts=10, max_iters=np.inf, restarts=10,
 
             # If best neighbor is an improvement,
             # move to that state and reset attempts counter
-            if next_fitness > problem.get_fitness():
+            if next_fitness >= problem.get_fitness():
+                #slight adjustment, allows transfer to next state, even if it is the exact same as current state
+                if abs(next_fitness-problem.get_fitness()) < IMPROVEMENT_TOLERANCE:
+                    # no improvement iters
+                    no_improve_iters += 1
+                else:
+                    no_improve_iters = 0
                 problem.set_state(next_state)
 
                 attempts = 0
@@ -207,7 +219,7 @@ def simulated_annealing(problem, schedule, max_attempts=10,
     fitness_list = []
     func_eval_count = 0
     print('\nworking on: SA')
-    while (attempts < max_attempts) and (iters < max_iters) and (no_improve_iters < (max_attempts*2)):
+    while (attempts < max_attempts) and (iters < max_iters) and (no_improve_iters < max_attempts):
         temp = schedule.evaluate(iters)
         iters += 1
 
@@ -232,7 +244,7 @@ def simulated_annealing(problem, schedule, max_attempts=10,
     
         prob = np.exp(delta_e/temp)
         if ITERATION_OUTPUT:
-            print('iter: {} - next fitness: {:0.2}: temperature: {:0.3e} - movement probability: {:07.3e}'.format(iters, next_fitness, temp, prob), end='\r', flush=True)
+            print('iter: {} - next fitness: {:0.3e}'.format(iters,next_fitness), end='\r', flush=True)
 
         # If best neighbor is an improvement or random value is less
         # than prob, move to that state and reset attempts counter 
@@ -426,44 +438,44 @@ mlrose.algorithms.mimic = mimic
 #Model generator functions that return lists of models, with different params.
 def generate_rhc_models(algo_ids=None):
     rhc_nn_A = mlrose.NeuralNetwork(hidden_nodes = [100,20], activation = 'relu', \
-                                algorithm = 'random_hill_climb', max_iters=10000, \
+                                algorithm = 'random_hill_climb', max_iters=N_MAX_ITER, \
                                 bias = True, is_classifier = True, learning_rate = 0.1, \
-                                early_stopping = True, clip_max = 1, max_attempts = 50)
+                                early_stopping = True, clip_max = 1, max_attempts = N_MAX_ATTEMPTS)
     rhc_nn_A = MachineLearningModel(rhc_nn_A, 'RHC-NN', '0.1LR', 'mlrose', id=algo_ids)
 
     rhc_nn_B = mlrose.NeuralNetwork(hidden_nodes = [100,20], activation = 'relu', \
-                                algorithm = 'random_hill_climb', max_iters=10000, \
+                                algorithm = 'random_hill_climb', max_iters=N_MAX_ITER, \
                                 bias = True, is_classifier = True, learning_rate = 0.3, \
-                                early_stopping = True, clip_max = 1, max_attempts = 50)
+                                early_stopping = True, clip_max = 1, max_attempts = N_MAX_ATTEMPTS)
     rhc_nn_B = MachineLearningModel(rhc_nn_B, 'RHC-NN', '0.3LR', 'mlrose', id=algo_ids)
     
     rhc_nn_C = mlrose.NeuralNetwork(hidden_nodes = [100,20], activation = 'relu', \
-                                algorithm = 'random_hill_climb', max_iters=10000, \
+                                algorithm = 'random_hill_climb', max_iters=N_MAX_ITER, \
                                 bias = True, is_classifier = True, learning_rate = 0.5, \
-                                early_stopping = True, clip_max = 1, max_attempts = 50)
+                                early_stopping = True, clip_max = 1, max_attempts = N_MAX_ATTEMPTS)
     rhc_nn_C = MachineLearningModel(rhc_nn_C, 'RHC-NN', '0.5LR', 'mlrose', id=algo_ids)
 
     return [rhc_nn_A, rhc_nn_B, rhc_nn_C]
 
 def generate_sa_models(algo_ids=None):
     sa_nn_A = mlrose.NeuralNetwork(hidden_nodes = [100,20], activation = 'relu', \
-                                algorithm = 'simulated_annealing', max_iters=10000,\
+                                algorithm = 'simulated_annealing', max_iters=N_MAX_ITER,\
                                 bias = True, is_classifier = True, \
-                                early_stopping = True, clip_max = 3, max_attempts = 100,\
+                                early_stopping = True, clip_max = 3, max_attempts = N_MAX_ATTEMPTS,\
                                 schedule=mlrose.decay.GeomDecay(init_temp=2.0, decay=0.99, min_temp=0.0))
     sa_nn_A = MachineLearningModel(sa_nn_A, 'SA-NN', '2-Temp-0.99-Decay', 'mlrose', id=algo_ids)
 
     sa_nn_B = mlrose.NeuralNetwork(hidden_nodes = [100,20], activation = 'relu', \
-                                algorithm = 'simulated_annealing', max_iters=10000,\
+                                algorithm = 'simulated_annealing', max_iters=N_MAX_ITER,\
                                 bias = True, is_classifier = True, \
-                                early_stopping = True, clip_max = 3, max_attempts = 100,\
+                                early_stopping = True, clip_max = 3, max_attempts = N_MAX_ATTEMPTS,\
                                 schedule=mlrose.decay.GeomDecay(init_temp=2.0, decay=0.999, min_temp=0.0))
     sa_nn_B = MachineLearningModel(sa_nn_B, 'SA-NN', '2-Temp-0.999-Decay', 'mlrose', id=algo_ids)  
 
     sa_nn_C = mlrose.NeuralNetwork(hidden_nodes = [100,20], activation = 'relu', \
-                                algorithm = 'simulated_annealing', max_iters=10000, \
+                                algorithm = 'simulated_annealing', max_iters=N_MAX_ITER, \
                                 bias = True, is_classifier = True, \
-                                early_stopping = True, clip_max = 3, max_attempts = 100,\
+                                early_stopping = True, clip_max = 3, max_attempts = N_MAX_ATTEMPTS,\
                                 schedule=mlrose.decay.GeomDecay(init_temp=10.0, decay=0.99, min_temp=0.0))
     sa_nn_C = MachineLearningModel(sa_nn_C, 'SA-NN', '10-Temp-0.99-Decay', 'mlrose', id=algo_ids)
     
@@ -472,23 +484,23 @@ def generate_sa_models(algo_ids=None):
 def generate_ga_models(algo_ids=None):
 
     ga_nn_A = mlrose.NeuralNetwork(hidden_nodes = [100,20], activation = 'relu', \
-                                algorithm = 'genetic_alg', max_iters = 100, \
+                                algorithm = 'genetic_alg', max_iters = N_MAX_ITER, \
                                 bias = True, is_classifier = True, learning_rate = 0.01, \
-                                early_stopping = True, clip_max = 1, max_attempts = 50,
+                                early_stopping = True, clip_max = 1, max_attempts = N_MAX_ATTEMPTS,
                                 pop_size=50, mutation_prob=0.1)
     ga_nn_A = MachineLearningModel(ga_nn_A, 'GA-NN', '50-Pop-0.1-Mutation', 'mlrose', id=algo_ids)
 
     ga_nn_B = mlrose.NeuralNetwork(hidden_nodes = [100,20], activation = 'relu', \
-                                algorithm = 'genetic_alg', max_iters = 100, \
+                                algorithm = 'genetic_alg', max_iters = N_MAX_ITER, \
                                 bias = True, is_classifier = True, learning_rate = 0.01, \
-                                early_stopping = True, clip_max = 1, max_attempts = 50,
+                                early_stopping = True, clip_max = 1, max_attempts = N_MAX_ATTEMPTS,
                                 pop_size=50, mutation_prob=0.3)
     ga_nn_B = MachineLearningModel(ga_nn_B, 'GA-NN', '50-Pop-0.3-Mutation', 'mlrose', id=algo_ids)
 
     ga_nn_C = mlrose.NeuralNetwork(hidden_nodes = [100,20], activation = 'relu', \
-                                algorithm = 'genetic_alg', max_iters = 100, \
+                                algorithm = 'genetic_alg', max_iters = N_MAX_ITER, \
                                 bias = True, is_classifier = True, learning_rate = 0.01, \
-                                early_stopping = True, clip_max = 1, max_attempts = 50,
+                                early_stopping = True, clip_max = 1, max_attempts = N_MAX_ATTEMPTS,
                                 pop_size=500, mutation_prob=0.3)
     ga_nn_C = MachineLearningModel(ga_nn_C, 'GA-NN', '500-Pop-0.3-Mutation', 'mlrose', id=algo_ids)
 
@@ -562,7 +574,7 @@ def optimize_neural_net():
             if PLOT_BATCH_LC:
                 generate_learning_curves(algo, train_dataset, num_chunks=N_LC_CHUNKS, num_k=N_CV)
 
-            print('training {} model on entire training dataset...'.format(algo.model_type))
+            print('\n\ntraining {} model on entire training dataset...'.format(algo.model_type))
             training_start = time.time()
             algo.model.fit(train_dataset.data, train_dataset.target)
             training_end = time.time()
@@ -608,9 +620,7 @@ def optimize_neural_net():
         #only write results to .csv file if specified
         print('writing csv for model results')
         detail_df.to_csv('output/'+str(algo_batch_id)+'/models_summary_'+str(USE_DATASET)+'.csv', sep=',', encoding='utf-8', index=False)
-
-    
-
+ 
 # Section two of assignment, optimization of various problems via random search methods.
 def generate_random_cities(n_cities=5):
     city_x = np.random.choice(range(n_cities), size=n_cities)
@@ -657,24 +667,28 @@ class OptProbWrapper(object):
         self.problem = mlrose.opt_probs.DiscreteOpt(length = gen_params, fitness_fn = self.fitness_func, maximize=True)
             
     def evaluate_algos(self):
+        #set max attempts for RHC and SA higher as complexity increases
+        self.rhc_sa_max_attempts = int(self.max_attempts*(2**(self.gen_params/15))) if (self.gen_params/15)> 1 else self.max_attempts
+
         print('\nworking on problem:', self.problem_name, 'input size:', self.gen_params)
         start_time = time.time()
-        self.rhc_best_state, self.rhc_best_fitness, self.rhc_fitness_list, self.rhc_func_eval_count = self.rhc(self.problem, max_attempts=self.max_attempts, max_iters=self.max_iter, restarts=self.restarts)
+        #allow more more iterations without improvement when the parameters space is larger
+        self.rhc_best_state, self.rhc_best_fitness, self.rhc_fitness_list, self.rhc_func_eval_count = self.rhc(self.problem, max_attempts=self.rhc_sa_max_attempts, max_iters=self.max_iter, restarts=self.restarts)
         self.rhc_train_time = (time.time()-start_time)
         if len(self.rhc_fitness_list) == self.max_iter:
             #this probably didn't converge then
             self.rhc_iter_to_converge = self.max_attempts
         else:
-            self.rhc_iter_to_converge = len(self.rhc_fitness_list) - self.max_attempts
+            self.rhc_iter_to_converge = len(self.rhc_fitness_list) - self.rhc_sa_max_attempts
 
         start_time = time.time()
-        self.sa_best_state, self.sa_best_fitness, self.sa_fitness_list, self.sa_func_eval_count = self.sa(self.problem, schedule=mlrose.decay.GeomDecay(init_temp=1.0, decay=0.99, min_temp=0.001), max_attempts=self.max_attempts, max_iters=self.max_iter)
+        self.sa_best_state, self.sa_best_fitness, self.sa_fitness_list, self.sa_func_eval_count = self.sa(self.problem, schedule=mlrose.decay.GeomDecay(init_temp=1.0, decay=0.99, min_temp=0.001), max_attempts=self.rhc_sa_max_attempts, max_iters=self.max_iter)
         self.sa_train_time = (time.time()-start_time)
         if len(self.sa_fitness_list) == self.max_iter:
             #this probably didn't converge then
             self.sa_iter_to_converge = self.max_attempts
         else:
-            self.sa_iter_to_converge = len(self.sa_fitness_list) - self.max_attempts
+            self.sa_iter_to_converge = len(self.sa_fitness_list) - self.rhc_sa_max_attempts
         
         start_time = time.time()
         self.ga_best_state, self.ga_best_fitness, self.ga_fitness_list, self.ga_func_eval_count = self.ga(self.problem, pop_size=self.pop_size, mutation_prob=0.3, max_attempts=self.max_attempts, max_iters=self.max_iter)
@@ -725,7 +739,7 @@ def optimization_problems():
 
     for problem_name in problem_name_list:
         for input_size in input_size_list:
-            optimizer = OptProbWrapper(problem_name=problem_name, gen_params=input_size, max_iter=100000, max_attempts=200, pop_size=300, keep_pct=0.35)
+            optimizer = OptProbWrapper(problem_name=problem_name, gen_params=input_size, max_iter=DO_MAX_ITER, max_attempts=DO_MAX_ATTEMPTS, pop_size=300, keep_pct=0.35)
             optimizer.evaluate_algos()
             results = optimizer.get_algo_results()
 
@@ -744,7 +758,6 @@ def optimization_problems():
                                                 'time_per_iter': value_list[4]/len(value_list[2]),
                                                 'approx_time_to_converge':(value_list[5]*(value_list[4]/len(value_list[2])))}, ignore_index=True)
 
-                
     if not os.path.exists(folder_path):
         os.makedirs(folder_path)
 
@@ -753,11 +766,11 @@ def optimization_problems():
         detail_df.to_csv(folder_path+'/optimization_details.csv', sep=',', encoding='utf-8', index=False)
 
     #save plots 
-    if PLOTACTION:
-        plot_opt_prob_curves(detail_df, plot_group='problem_name', line_group='model_name', x_col='input_size', y_col='iter_to_converge', figure_action=PLOTACTION, figure_path=folder_path, file_name='iters_to_converge')
-        plot_opt_prob_curves(detail_df, plot_group='problem_name', line_group='model_name', x_col='input_size', y_col='approx_time_to_converge', figure_action=PLOTACTION, figure_path=folder_path, file_name='approx_time_to_converge')
-        plot_opt_prob_curves(detail_df, plot_group='problem_name', line_group='model_name', x_col='input_size', y_col='best_fitness', figure_action=PLOTACTION, figure_path=folder_path, file_name='best_fitness')
-        plot_opt_prob_curves(detail_df, plot_group='problem_name', line_group='model_name', x_col='input_size', y_col='func_eval_count', figure_action=PLOTACTION, figure_path=folder_path, file_name='func_eval_count')
+    if PLOT_ACTION:
+        plot_opt_prob_curves(detail_df, plot_group='problem_name', line_group='model_name', x_col='input_size', y_col='iter_to_converge', figure_action=PLOT_ACTION, figure_path=folder_path, file_name='iters_to_converge')
+        plot_opt_prob_curves(detail_df, plot_group='problem_name', line_group='model_name', x_col='input_size', y_col='approx_time_to_converge', figure_action=PLOT_ACTION, figure_path=folder_path, file_name='approx_time_to_converge')
+        plot_opt_prob_curves(detail_df, plot_group='problem_name', line_group='model_name', x_col='input_size', y_col='best_fitness', figure_action=PLOT_ACTION, figure_path=folder_path, file_name='best_fitness')
+        plot_opt_prob_curves(detail_df, plot_group='problem_name', line_group='model_name', x_col='input_size', y_col='func_eval_count', figure_action=PLOT_ACTION, figure_path=folder_path, file_name='func_eval_count')
 
     return None
 
