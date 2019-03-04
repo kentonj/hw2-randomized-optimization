@@ -9,7 +9,7 @@ from sklearn import preprocessing
 from sklearn.model_selection import cross_val_score, learning_curve
 from sklearn.metrics import confusion_matrix, f1_score, recall_score, precision_score, roc_auc_score, auc, accuracy_score, roc_curve, balanced_accuracy_score
 
-from plot_utils import plot_confusion_matrix, plot_model_family_learning_curves
+from plot_utils import plot_confusion_matrix, plot_model_family_learning_curves, plot_opt_prob_curves
 from etl_utils import *
 
 import mlrose
@@ -18,23 +18,31 @@ np.seterr(over='ignore') #ignore overflow in exponent warnings
 
 #general params:
 #plotting
-PLOT_BATCH_LC = True
-PLOT_ACTION = 'save' # (None, 'save', 'show') - default to None to avoid issues with matplotlib depending on OS
 
-# randomized optimization algorithm params
-N_RESTARTS = 10
+PLOT_ACTION = 'save' # (None, 'save', 'show') - default to None to avoid issues with matplotlib depending on OS TODO: set to None
+PLOT_BATCH_LC = True #this will be overwritten if PLOT_ACTION is "None"
+ITERATION_OUTPUT = True # True or False, to print updates as each algorithm is iterating TODO: set to False
+
+# randomized optimization for neural network params
+N_RESTARTS = 10 # number of random restarts to do with randomized hill climbing.
 IMPROVEMENT_TOLERANCE = 0.00001 #this helps determine if convergence has happened
 
 #dataset handling and cleaning
 USE_DATASET = 'aps' #one of ('spam', 'aps')
+BALANCE_METHOD = 'downsample' # (int, 'downsample' or 'upsample') #downsample to balance classes
 N_LC_CHUNKS = 5 #number of chunks for learning curve data segmentation
 N_CV = 0.2 # percentage to use as validation
-BALANCE_METHOD = 'downsample' # (int, 'downsample' or 'upsample')
-# SCORING_METRIC = 'roc_auc' #this works well for both balanced and imbalanced classification problems
-
 
 # FULL DISCLOSURE, THESE MONKEY-PATCHED METHODS ARE DIRECTLY STOLEN FROM mlrose: https://github.com/gkhayes/mlrose
-# (a dependency of this project), with slight changes to track the fitness function at each iterations
+# (a dependency of this project), with some modifications to algorithms and neural network fitting, along with tracking information for each algorithm. 
+# The following 5 methods are monkey-patched from the original source code 
+# 1. NeuralNetwork.fit
+# 2. algorithms.random_hill_climb, 
+# 3. algorithms.simulated_annealing
+# 4. algorithms.genetic_alg
+# 5. algorithms.mimic
+# A new method is patched in as well, random_sa_neighbor, which allows for setting a variable step size based on temperature for continuous problems.
+
 def fit(self, X, y, init_weights=None):
     # Make sure y is an array and not a list
     y = np.array(y)
@@ -69,7 +77,6 @@ def fit(self, X, y, init_weights=None):
                             min_val=-1*self.clip_max,
                             max_val=self.clip_max, step=self.lr)
 
-    print('max iters set to:', self.max_iters)
     if self.algorithm == 'random_hill_climb':
         if init_weights is None:
             #this sets the init weights permanently for each restart
@@ -130,7 +137,9 @@ def random_hill_climb(problem, max_attempts=10, max_iters=np.inf, restarts=10,
     best_state = None
 
     fitness_list = []
-    
+    func_eval_count = 0
+    print('\nworking on: RHC')
+
     for i in range(restarts + 1):
         
         # Initialize optimization problem and attempts counter
@@ -144,16 +153,17 @@ def random_hill_climb(problem, max_attempts=10, max_iters=np.inf, restarts=10,
 
         while (attempts < max_attempts) and (iters < max_iters):
             iters += 1
-
             # Find random neighbor and evaluate fitness
             next_state = problem.random_neighbor()
             next_fitness = problem.eval_fitness(next_state)
+            func_eval_count += 1
+            if ITERATION_OUTPUT:
+                print('iter: {} - next fitness: {:0.3e}'.format(iters,next_fitness), end='\r', flush=True)
 
             # If best neighbor is an improvement,
             # move to that state and reset attempts counter
             if next_fitness > problem.get_fitness():
                 problem.set_state(next_state)
-                print('restart: {} - current fitness: {:0.3e}'.format(i,next_fitness), end='\r', flush=True)
 
                 attempts = 0
             else:
@@ -161,7 +171,7 @@ def random_hill_climb(problem, max_attempts=10, max_iters=np.inf, restarts=10,
 
             #this should always be the same as the last move, unless this fitness eval was better than the last
             fitness_list.append(problem.get_fitness())
-        print('')
+        
 
         # Update best state and best fitness
         if problem.get_fitness() > best_fitness:
@@ -170,7 +180,7 @@ def random_hill_climb(problem, max_attempts=10, max_iters=np.inf, restarts=10,
     print('')
     best_fitness = problem.get_maximize()*best_fitness
     func_eval_list = fitness_list #func evals is the same as the fitness evaluation list
-    return best_state, best_fitness, fitness_list, func_eval_list
+    return best_state, best_fitness, fitness_list, func_eval_count
 
 def simulated_annealing(problem, schedule, max_attempts=10,
                         max_iters=np.inf, init_state=None):
@@ -195,7 +205,8 @@ def simulated_annealing(problem, schedule, max_attempts=10,
     iters = 0
     no_improve_iters = 0
     fitness_list = []
-    func_eval_list = []
+    func_eval_count = 0
+    print('\nworking on: SA')
     while (attempts < max_attempts) and (iters < max_iters) and (no_improve_iters < (max_attempts*2)):
         temp = schedule.evaluate(iters)
         iters += 1
@@ -204,48 +215,47 @@ def simulated_annealing(problem, schedule, max_attempts=10,
             print('temperature went negative, stopping now')
             break
 
+        #if it's a discrete variable, use original random_neighbor method
+        if isinstance(problem, mlrose.opt_probs.DiscreteOpt) or issubclass(type(problem), mlrose.opt_probs.DiscreteOpt):
+            next_state = problem.random_neighbor()
         else:
-            #if it's a discrete variable, use original random_neighbor method
-            if isinstance(problem, mlrose.opt_probs.DiscreteOpt) or issubclass(type(problem), mlrose.opt_probs.DiscreteOpt):
-                next_state = problem.random_neighbor()
+            # otherwise
+            # Find random neighbor and evaluate fitness - THIS SHOULD BE GLOBAL RANDOM NEIGHBOR
+            next_state = problem.random_sa_neighbor(current_temp=temp)
+
+        next_fitness = problem.eval_fitness(next_state)
+        func_eval_count += 1
+
+        # Calculate delta E and change prob
+        current_fitness = problem.get_fitness()
+        delta_e = next_fitness - current_fitness
+    
+        prob = np.exp(delta_e/temp)
+        if ITERATION_OUTPUT:
+            print('iter: {} - next fitness: {:0.2}: temperature: {:0.3e} - movement probability: {:07.3e}'.format(iters, next_fitness, temp, prob), end='\r', flush=True)
+
+        # If best neighbor is an improvement or random value is less
+        # than prob, move to that state and reset attempts counter 
+        rando = np.random.uniform()
+        if (delta_e > 0) or (rando < prob):
+            if abs(delta_e) < IMPROVEMENT_TOLERANCE:
+                # no improvement iters
+                no_improve_iters += 1
             else:
-                # otherwise
-                # Find random neighbor and evaluate fitness - THIS SHOULD BE GLOBAL RANDOM NEIGHBOR
-                next_state = problem.random_sa_neighbor(current_temp=temp)
+                no_improve_iters = 0
+            problem.set_state(next_state)
+            attempts = 0
+        else:
+            attempts += 1
 
-            next_fitness = problem.eval_fitness(next_state)
-            func_eval_list.append(next_fitness)
-
-            # Calculate delta E and change prob
-            current_fitness = problem.get_fitness()
-            delta_e = next_fitness - current_fitness
-        
-            prob = np.exp(delta_e/temp)
-            
-            print('iter:{:0>6} - attempt:{:0>3} - iters no improvement:{:0>3} - current fitness:{:0.3e}: temperature: {:0.3e} - probability:{:07.3e}'.format(iters, attempts, no_improve_iters, current_fitness, temp, prob), end='\r', flush=True)
-
-            # If best neighbor is an improvement or random value is less
-            # than prob, move to that state and reset attempts counter 
-            rando = np.random.uniform()
-            if (delta_e > 0) or (rando < prob):
-                if abs(delta_e) < IMPROVEMENT_TOLERANCE:
-                    # no improvement iters
-                    no_improve_iters += 1
-                else:
-                    no_improve_iters = 0
-                problem.set_state(next_state)
-                attempts = 0
-                #only record new fitness when a direction is chosen
-                fitness_list.append(problem.get_fitness())
-            else:
-                attempts += 1
+        fitness_list.append(problem.get_fitness())
 
     print('')
 
     best_fitness = problem.get_maximize()*problem.get_fitness()
     best_state = problem.get_state()
 
-    return best_state, best_fitness, fitness_list, func_eval_list
+    return best_state, best_fitness, fitness_list, func_eval_count
 
 def genetic_alg(problem, pop_size=200, mutation_prob=0.1, max_attempts=10,
                 max_iters=np.inf):
@@ -275,7 +285,9 @@ def genetic_alg(problem, pop_size=200, mutation_prob=0.1, max_attempts=10,
     iters = 0
 
     fitness_list = []
-    func_eval_list = []
+    func_eval_count = 0
+
+    print('\nworking on: GA')
     while (attempts < max_attempts) and (iters < max_iters):
         iters += 1
 
@@ -297,14 +309,16 @@ def genetic_alg(problem, pop_size=200, mutation_prob=0.1, max_attempts=10,
             next_gen.append(child)
 
         next_gen = np.array(next_gen)
+
         problem.set_population(next_gen)
+        func_eval_count += (len(next_gen)) #each member of population is evaluated
 
         next_state = problem.best_child()
         next_fitness = problem.eval_fitness(next_state)
-        
-        print('iter: {} - next fitness: {:0.3e}'.format(iters,next_fitness), end='\r', flush=True)
+        func_eval_count += 1
 
-        func_eval_list.append(next_fitness)
+        if ITERATION_OUTPUT:
+            print('iter: {} - next fitness: {:0.3e}'.format(iters,next_fitness), end='\r', flush=True)
 
         # If best child is an improvement,
         # move to that state and reset attempts counter
@@ -314,13 +328,13 @@ def genetic_alg(problem, pop_size=200, mutation_prob=0.1, max_attempts=10,
         else:
             attempts += 1
         
-        #don't append at the end of every fitness evaluation, only after the entire population has been sampled
         fitness_list.append(problem.get_fitness())
+
     print('')
     best_fitness = problem.get_maximize()*problem.get_fitness()
     best_state = problem.get_state()
 
-    return best_state, best_fitness, fitness_list, func_eval_list
+    return best_state, best_fitness, fitness_list, func_eval_count
 
 def mimic(problem, pop_size=200, keep_pct=0.2, max_attempts=10,
           max_iters=np.inf):
@@ -352,6 +366,8 @@ def mimic(problem, pop_size=200, keep_pct=0.2, max_attempts=10,
     attempts = 0
     iters = 0
     fitness_list = []
+    func_eval_count = 0
+    print('\nworking on: MIMIC')
     while (attempts < max_attempts) and (iters < max_iters):
         iters += 1
 
@@ -364,12 +380,15 @@ def mimic(problem, pop_size=200, keep_pct=0.2, max_attempts=10,
         # Generate new sample
         new_sample = problem.sample_pop(pop_size)
         problem.set_population(new_sample)
+        func_eval_count += len(new_sample)
 
         next_state = problem.best_child()
 
         next_fitness = problem.eval_fitness(next_state)
         fitness_list.append(next_fitness)
-        print('iter: {} - next fitness: {:0.3e}'.format(iters,next_fitness), end='\r', flush=True)
+        func_eval_count += 1
+        if ITERATION_OUTPUT:
+            print('iter: {} - next fitness: {:0.3e}'.format(iters,next_fitness), end='\r', flush=True)
 
         # If best child is an improvement,
         # move to that state and reset attempts counter
@@ -382,8 +401,8 @@ def mimic(problem, pop_size=200, keep_pct=0.2, max_attempts=10,
     print('')
     best_fitness = problem.get_maximize()*problem.get_fitness()
     best_state = problem.get_state().astype(int)
-    func_eval_list = fitness_list
-    return best_state, best_fitness, fitness_list, func_eval_list
+    
+    return best_state, best_fitness, fitness_list, func_eval_count
 
 #new random neighbor function for simulated annealing, based on current temperature
 def random_sa_neighbor(self, current_temp):
@@ -404,8 +423,8 @@ mlrose.algorithms.simulated_annealing = simulated_annealing
 mlrose.algorithms.genetic_alg = genetic_alg
 mlrose.algorithms.mimic = mimic
 
+#Model generator functions that return lists of models, with different params.
 def generate_rhc_models(algo_ids=None):
-
     rhc_nn_A = mlrose.NeuralNetwork(hidden_nodes = [100,20], activation = 'relu', \
                                 algorithm = 'random_hill_climb', max_iters=10000, \
                                 bias = True, is_classifier = True, learning_rate = 0.1, \
@@ -475,6 +494,7 @@ def generate_ga_models(algo_ids=None):
 
     return [ga_nn_A, ga_nn_B, ga_nn_C]
 
+#evaluation of randomized optimization model for neural network weights
 def evaluate_model(algo, test_data, classes_list):
     '''
     using the fitted model, 
@@ -506,31 +526,23 @@ def evaluate_model(algo, test_data, classes_list):
     return algo
 
 def optimize_neural_net():
-
     algo_batch_id = int(datetime.datetime.now().strftime('%Y%m%d%H%M%S')) #set ID for one run, so all the algos have the same ID
+
+    # dictionary of model generator functions to iterate through training
     algo_dict = {
         'SA-NN':generate_sa_models,
         'RHC-NN':generate_rhc_models,
         'GA-NN':generate_ga_models
     }
-    #load dataset
-    
-    if USE_DATASET == 'spam':
-        df = pd.read_csv('data/spam/spambasedata.csv', sep=',')
-        print('using the dataset stored in ./data/spam')
-        #shuffle data before splitting to train and test
-        df = df.sample(frac=1).reset_index(drop=True)
-        train_frac = 0.8
-        train_samples = int(round(df.shape[0]*train_frac))
-        dirty_train_df = df.iloc[:train_samples,:]
-        dirty_test_df = df.iloc[train_samples:,:]
-        class_col = 'class'
 
-    elif USE_DATASET == 'aps':
+    #load dataset
+    if USE_DATASET == 'aps':
         dirty_train_df = pd.read_csv('data/aps/aps_failure_training_set.csv', na_values=['na'])
         dirty_test_df = pd.read_csv('data/aps/aps_failure_test_set.csv', na_values=['na'])
         print('using the dataset stored in ./data/aps')
         class_col = 'class'
+    else:
+        raise Exception('dataset other than `aps` was specified, no current implementation for other data sets.')
 
     #clean both datasets
     scaler = preprocessing.MinMaxScaler()
@@ -541,7 +553,7 @@ def optimize_neural_net():
     print('{} maps to {}'.format(label_encoder.classes_, label_encoder.transform(label_encoder.classes_)))
     print('size of training dataset:', train_dataset.data.shape)
 
-    detail_df = pd.DataFrame(columns=['Model Name', 'Precision', 'Recall', 'F1', 'ROC-AUC', 'Accuracy', 'Balanced Accuracy', 'Training Time', 'Evaluation Time'])
+    detail_df = pd.DataFrame(columns=['Model Name', 'Precision', 'Recall', 'F1', 'ROC-AUC', 'Accuracy', 'Training Time', 'Evaluation Time'])
     for algo_family_name, algo_generator in algo_dict.items():
         print('\ngenerating learning curves for {}'.format(algo_family_name))
         algo_list = algo_generator(algo_ids=algo_batch_id)
@@ -561,53 +573,45 @@ def optimize_neural_net():
             algo.iter_scores = loss_list
 
             algo = evaluate_model(algo, test_dataset, classes_list=label_encoder.classes_)
-
             detail_df = detail_df.append({'Model Name': algo.model_type, 
                                         'Precision': algo.precision, 
                                         'Recall':algo.recall, 
                                         'F1':algo.f1, 
                                         'ROC-AUC':algo.roc_auc, 
                                         'Accuracy':algo.accuracy, 
-                                        'Balanced Accuracy':algo.balanced_accuracy, 
                                         'Training Time':algo.training_time,
                                         'Evaluation Time':algo.evaluation_time}, ignore_index=True)
 
-        if PLOT_BATCH_LC:
+        if PLOT_ACTION:
+            if PLOT_BATCH_LC:
+                plot_model_family_learning_curves(algo_family_name, 
+                                                    algo_list, 
+                                                    iter_based=False,
+                                                    figure_action=PLOT_ACTION, 
+                                                    figure_path='output/'+str(algo_batch_id)+'-neuralnet/figures/lc',
+                                                    file_name=(str(algo_family_name)+'_batch'))
+
             plot_model_family_learning_curves(algo_family_name, 
-                                                algo_list, 
-                                                iter_based=False,
-                                                figure_action=PLOT_ACTION, 
-                                                figure_path='output/'+str(algo_batch_id)+'/figures/lc',
-                                                file_name=(str(algo_family_name)+'_batch'))
+                                                    algo_list, 
+                                                    iter_based=True,
+                                                    figure_action=PLOT_ACTION, 
+                                                    figure_path='output/'+str(algo_batch_id)+'-neuralnet/figures/lc',
+                                                    file_name=(str(algo_family_name)+'_iter'))
 
-        plot_model_family_learning_curves(algo_family_name, 
-                                                algo_list, 
-                                                iter_based=True,
-                                                figure_action=PLOT_ACTION, 
-                                                figure_path='output/'+str(algo_batch_id)+'/figures/lc',
-                                                file_name=(str(algo_family_name)+'_iter'))
-
-        plot_confusion_matrix(algo_family_name, 
-                                algo_list, 
-                                label_encoder.classes_, 
-                                figure_action=PLOT_ACTION, 
-                                figure_path='output/'+str(algo_batch_id)+'/figures/cm',
-                                file_name=(str(algo_family_name)))
-                                
-    detail_df.to_csv('output/'+str(algo_batch_id)+'/models_summary_'+str(USE_DATASET)+'.csv', sep=',', encoding='utf-8', index=False)
-
-def optimization_problem_generator(opt_problem):
-    print('working on problem:', opt_problem.problem)
-    print('doing randomized hill climbing')
-    rhc_best_state, rhc_best_fitness, rhc_fitness_list, rhc_func_eval_list = mlrose.algorithms.random_hill_climb(opt_problem, max_attempts=1000000, restarts=5)
-    print('doing simulated annealing')
-    sa_best_state, sa_best_fitness, sa_fitness_list, sa_func_eval_list = mlrose.algorithms.simulated_annealing(opt_problem, schedule=mlrose.decay.GeomDecay(init_temp=2.0, decay=0.99, min_temp=0.001), max_attempts=1000000)
-    print('doing genetic algorithm')
-    ga_best_state, ga_best_fitness, ga_fitness_list, ga_func_eval_list = mlrose.algorithms.genetic_alg(opt_problem, pop_size=100, mutation_prob=0.3, max_attempts=1000000)
-    print('doing mimic')
-    mimic_best_state, mimic_best_fitness, mimic_fitness_list, mimic_func_eval_list = mlrose.algorithms.mimic(opt_problem, pop_size=100, keep_pct=0.2, max_attempts=1000000)
+            plot_confusion_matrix(algo_family_name, 
+                                    algo_list, 
+                                    label_encoder.classes_, 
+                                    figure_action=PLOT_ACTION, 
+                                    figure_path='output/'+str(algo_batch_id)+'-neuralnet/figures/cm',
+                                    file_name=(str(algo_family_name)))
+    if OUTPUT_CSV:
+        #only write results to .csv file if specified
+        print('writing csv for model results')
+        detail_df.to_csv('output/'+str(algo_batch_id)+'/models_summary_'+str(USE_DATASET)+'.csv', sep=',', encoding='utf-8', index=False)
 
     
+
+# Section two of assignment, optimization of various problems via random search methods.
 def generate_random_cities(n_cities=5):
     city_x = np.random.choice(range(n_cities), size=n_cities)
     city_y = np.random.choice(range(n_cities), size=n_cities)
@@ -615,7 +619,12 @@ def generate_random_cities(n_cities=5):
     return city_coords
 
 class OptProbWrapper(object):
-    def __init__(self, problem_name, gen_params=None, max_iter=1000, max_attempts=100, pop_size=100, restarts=5):
+    '''
+    wrapper class for optimization problems, solve each problem using all 4 optimization algorithms 
+        with a single call to evaluate_algos().
+    Also initializes the fitness function given a string input ('flipflop', 'fourpeaks', 'knapsack')
+    '''
+    def __init__(self, problem_name, gen_params=None, max_iter=1000, max_attempts=100, pop_size=100, restarts=0, keep_pct=0.2):
         self.problem_name = problem_name
         self.rhc = mlrose.algorithms.random_hill_climb
         self.sa = mlrose.algorithms.simulated_annealing
@@ -626,67 +635,65 @@ class OptProbWrapper(object):
         self.pop_size = pop_size
         self.restarts = restarts
         self.gen_params = gen_params
+        self.keep_pct = keep_pct
         self.algo_result_dict = None
+        self.rhc_train_time = None
+        self.sa_train_time = None 
+        self.ga_train_time = None 
+        self.mimic_train_time = None
 
-        if problem_name.lower() == 'travellingsalesman':
-            # if its a traveling salesman problem, then create the fitness function, pass in gen_params, as the coordinates in this case
-            city_coords = generate_random_cities(n_cities=self.gen_params)
-            self.fitness_func = mlrose.TravellingSales(coords=city_coords)
-            self.problem = mlrose.opt_probs.TSPOpt(length = len(city_coords), fitness_fn = self.fitness_func, maximize=True)
+        if problem_name.lower() == 'flipflop':
+            self.fitness_func = mlrose.FlipFlop()
+        elif problem_name.lower() == 'fourpeaks':
+            self.fitness_func = mlrose.FourPeaks()
+        elif problem_name.lower() == 'knapsack':
+            #weighs twice as much as it's worth
+            weights = 2 * np.random.choice(range(1, self.gen_params+1, 1), size=self.gen_params)
+            values = np.random.choice(range(1, self.gen_params+1, 1), size=self.gen_params)
+            self.fitness_func = mlrose.Knapsack(weights, values)
         else:
-            if problem_name.lower() == 'onemax':
-                self.fitness_func = mlrose.OneMax()
-            elif problem_name.lower() == 'flipflop':
-                self.fitness_func = mlrose.FlipFlop()
-            elif problem_name.lower() == 'fourpeaks':
-                self.fitness_func = mlrose.FourPeaks()
-            elif problem_name.lower() == 'sixpeaks':
-                self.fitness_func = mlrose.SixPeaks()
-            elif problem_name.lower() == 'continuouspeaks':
-                self.fitness_func = mlrose.ContinuousPeaks()
-            elif problem_name.lower() == 'knapsack':
-                #weighs twice as much as it's worth
-                weights = 2 * np.random.choice(range(1, self.gen_params+1, 1), size=self.gen_params)
-                print(weights)
-                values = np.random.choice(range(1, self.gen_params+1, 1), size=self.gen_params)
-                print(values)
-                self.fitness_func = mlrose.Knapsack(weights, values, max_weight_pct=0.35)
-            elif problem_name.lower() == 'queens':
-                self.fitness_func = mlrose.Queens()
-            else:
-                raise Exception('no problem name provided')
+            raise Exception('incorrect problem name provided, choose: knapsack, flipflop, or fourpeaks')
 
-            self.problem = mlrose.opt_probs.DiscreteOpt(length = gen_params, fitness_fn = self.fitness_func, maximize=True)
+        self.problem = mlrose.opt_probs.DiscreteOpt(length = gen_params, fitness_fn = self.fitness_func, maximize=True)
             
     def evaluate_algos(self):
-        print('\nworking on problem:', self.problem_name)
-        print('doing randomized hill climbing')
-        self.rhc_best_state, self.rhc_best_fitness, self.rhc_fitness_list, self.rhc_func_eval_list = self.rhc(self.problem, max_attempts=self.max_attempts, max_iters=self.max_iter, restarts=self.restarts)
-        print('doing simulated annealing')
-        self.sa_best_state, self.sa_best_fitness, self.sa_fitness_list, self.sa_func_eval_list = self.sa(self.problem, schedule=mlrose.decay.GeomDecay(init_temp=2.0, decay=0.99, min_temp=0.001), max_attempts=self.max_attempts, max_iters=self.max_iter)
-        print('doing genetic algorithm')
-        self.ga_best_state, self.ga_best_fitness, self.ga_fitness_list, self.ga_func_eval_list = self.ga(self.problem, pop_size=self.pop_size, mutation_prob=0.3, max_attempts=self.max_attempts, max_iters=self.max_iter)
-        print('doing mimic')
-        self.mimic_best_state, self.mimic_best_fitness, self.mimic_fitness_list, self.mimic_func_eval_list = self.mimic(self.problem, pop_size=self.pop_size, keep_pct=0.2, max_attempts=self.max_attempts, max_iters=self.max_iter)
-    
-    def write_to_csv(self, folder_path, file_name, column_names=None):
-        if not column_names:
-            detail_df = pd.DataFrame(columns=['model_name', 'best_state', 'best_fitness', 'fitness_list', 'func_eval_list'])
+        print('\nworking on problem:', self.problem_name, 'input size:', self.gen_params)
+        start_time = time.time()
+        self.rhc_best_state, self.rhc_best_fitness, self.rhc_fitness_list, self.rhc_func_eval_count = self.rhc(self.problem, max_attempts=self.max_attempts, max_iters=self.max_iter, restarts=self.restarts)
+        self.rhc_train_time = (time.time()-start_time)
+        if len(self.rhc_fitness_list) == self.max_iter:
+            #this probably didn't converge then
+            self.rhc_iter_to_converge = self.max_attempts
+        else:
+            self.rhc_iter_to_converge = len(self.rhc_fitness_list) - self.max_attempts
 
-        if not os.path.exists(folder_path):
-            os.makedirs(folder_path)
-        full_file_path = folder_path + '/' + file_name    
-        results = OptProbWrapper.get_algo_results(self)
-        for key, value_list in results.items():
-            detail_df = detail_df.append({'model_name': key, 
-                                        'best_state': value_list[0],
-                                        'best_fitness': value_list[1],
-                                        'fitness_list': value_list[2],
-                                        'func_eval_list': value_list[3]}, ignore_index=True)
+        start_time = time.time()
+        self.sa_best_state, self.sa_best_fitness, self.sa_fitness_list, self.sa_func_eval_count = self.sa(self.problem, schedule=mlrose.decay.GeomDecay(init_temp=1.0, decay=0.99, min_temp=0.001), max_attempts=self.max_attempts, max_iters=self.max_iter)
+        self.sa_train_time = (time.time()-start_time)
+        if len(self.sa_fitness_list) == self.max_iter:
+            #this probably didn't converge then
+            self.sa_iter_to_converge = self.max_attempts
+        else:
+            self.sa_iter_to_converge = len(self.sa_fitness_list) - self.max_attempts
+        
+        start_time = time.time()
+        self.ga_best_state, self.ga_best_fitness, self.ga_fitness_list, self.ga_func_eval_count = self.ga(self.problem, pop_size=self.pop_size, mutation_prob=0.3, max_attempts=self.max_attempts, max_iters=self.max_iter)
+        self.ga_train_time = (time.time()-start_time)
+        if len(self.ga_fitness_list) == self.max_iter:
+            print()
+            #this probably didn't converge then
+            self.ga_iter_to_converge = self.max_attempts
+        else:
+            self.ga_iter_to_converge = len(self.ga_fitness_list) - self.max_attempts
 
-        detail_df.to_csv(full_file_path, sep=',', encoding='utf-8', index=False)
-                    
-
+        start_time = time.time()
+        self.mimic_best_state, self.mimic_best_fitness, self.mimic_fitness_list, self.mimic_func_eval_count = self.mimic(self.problem, pop_size=self.pop_size, keep_pct=self.keep_pct, max_attempts=self.max_attempts, max_iters=self.max_iter)
+        self.mimic_train_time = (time.time()-start_time)
+        if len(self.mimic_fitness_list) == self.max_iter:
+            #this probably didn't converge then
+            self.mimic_iter_to_converge = self.max_attempts
+        else:
+            self.mimic_iter_to_converge = len(self.mimic_fitness_list) - self.max_attempts                    
 
     def get_best_fitness(self):
         self.best_fitness_dict = {key: value[1] for (key, value) in self.algo_result_dict.items()}
@@ -696,50 +703,69 @@ class OptProbWrapper(object):
     def get_algo_results(self, dict_key=None):
         if not self.algo_result_dict: #create if it's not created
             self.algo_result_dict = {
-                'rhc':[self.rhc_best_state, self.rhc_best_fitness, self.rhc_fitness_list, self.rhc_func_eval_list],
-                'sa':[self.sa_best_state, self.sa_best_fitness, self.sa_fitness_list, self.sa_func_eval_list],
-                'ga':[self.ga_best_state, self.ga_best_fitness, self.ga_fitness_list, self.ga_func_eval_list],
-                'mimic':[self.mimic_best_state, self.mimic_best_fitness, self.mimic_fitness_list, self.mimic_func_eval_list]
+                'rhc':[self.rhc_best_state, self.rhc_best_fitness, self.rhc_fitness_list, self.rhc_func_eval_count, self.rhc_train_time, self.rhc_iter_to_converge],
+                'sa':[self.sa_best_state, self.sa_best_fitness, self.sa_fitness_list, self.sa_func_eval_count, self.sa_train_time, self.sa_iter_to_converge],
+                'ga':[self.ga_best_state, self.ga_best_fitness, self.ga_fitness_list, self.ga_func_eval_count, self.ga_train_time, self.ga_iter_to_converge],
+                'mimic':[self.mimic_best_state, self.mimic_best_fitness, self.mimic_fitness_list, self.mimic_func_eval_count, self.mimic_train_time, self.mimic_iter_to_converge]
             }
         if dict_key:
             return self.algo_result_dict.get(dict_key, None)
         else:
             return self.algo_result_dict
 
+# controller function for iterating through different optimization problems
 def optimization_problems():
     problem_batch_id = int(datetime.datetime.now().strftime('%Y%m%d%H%M%S')) #set ID for one run, so all the algos have the same ID
-    folder_path = 'output/opt-probs/'+str(problem_batch_id)
-    tiers_list = [10,20,30,40,50]
-    problem_name_list = ['knapsack','queens','travellingsalesman', 'onemax', 'flipflop', 'fourpeaks', 'sixpeaks', 'continuouspeaks']
+    folder_path = 'output/'+str(problem_batch_id)+'-optprobs'
+    input_size_list = [10, 20, 30, 40, 50, 60, 70, 80]
+    # fourpeaks - MIMIC, knapsack- GA, flipflop - SA
+    problem_name_list = ['flipflop', 'knapsack', 'fourpeaks']
 
-    detail_df = pd.DataFrame(columns=['problem_name', 'tier', 'model_name', 'best_state', 'best_fitness', 'fitness_list', 'func_eval_list', 'n_iter', 'n_func_evals'])
+    detail_df = pd.DataFrame(columns=['problem_name', 'input_size', 'model_name', 'best_state', 'best_fitness', 'fitness_list', 'total_iter_count', 'func_eval_count', 'train_time', 'iter_to_converge', 'time_per_iter', 'approx_time_to_converge'])
 
     for problem_name in problem_name_list:
-        for tier in tiers_list:
-            optimizer = OptProbWrapper(problem_name=problem_name, gen_params=tier, max_iter=100000, max_attempts=100)
-
+        for input_size in input_size_list:
+            optimizer = OptProbWrapper(problem_name=problem_name, gen_params=input_size, max_iter=100000, max_attempts=200, pop_size=300, keep_pct=0.35)
             optimizer.evaluate_algos()
             results = optimizer.get_algo_results()
+
             for key, value_list in results.items():
+                # problem_plotting_dict[key] = []
                 detail_df = detail_df.append({'problem_name': problem_name,
-                                                'tier':tier,
+                                                'input_size':input_size,
                                                 'model_name': key,
                                                 'best_state': value_list[0],
                                                 'best_fitness': value_list[1],
                                                 'fitness_list': value_list[2],
-                                                'func_eval_list': value_list[3],
-                                                'n_iter': len(value_list[2]),
-                                                'n_func_evals': len(value_list[3])}, ignore_index=True)
+                                                'total_iter_count': len(value_list[2]),
+                                                'func_eval_count': value_list[3],
+                                                'train_time': value_list[4],
+                                                'iter_to_converge': value_list[5],
+                                                'time_per_iter': value_list[4]/len(value_list[2]),
+                                                'approx_time_to_converge':(value_list[5]*(value_list[4]/len(value_list[2])))}, ignore_index=True)
+
+                
     if not os.path.exists(folder_path):
         os.makedirs(folder_path)
-        full_path = folder_path + '/' + 'problem_details.csv'
-    detail_df.to_csv(full_path, sep=',', encoding='utf-8', index=False)
+
+    # save the dataframe to CSV
+    if OUTPUT_CSV:
+        detail_df.to_csv(folder_path+'/optimization_details.csv', sep=',', encoding='utf-8', index=False)
+
+    #save plots 
+    if PLOTACTION:
+        plot_opt_prob_curves(detail_df, plot_group='problem_name', line_group='model_name', x_col='input_size', y_col='iter_to_converge', figure_action=PLOTACTION, figure_path=folder_path, file_name='iters_to_converge')
+        plot_opt_prob_curves(detail_df, plot_group='problem_name', line_group='model_name', x_col='input_size', y_col='approx_time_to_converge', figure_action=PLOTACTION, figure_path=folder_path, file_name='approx_time_to_converge')
+        plot_opt_prob_curves(detail_df, plot_group='problem_name', line_group='model_name', x_col='input_size', y_col='best_fitness', figure_action=PLOTACTION, figure_path=folder_path, file_name='best_fitness')
+        plot_opt_prob_curves(detail_df, plot_group='problem_name', line_group='model_name', x_col='input_size', y_col='func_eval_count', figure_action=PLOTACTION, figure_path=folder_path, file_name='func_eval_count')
+
+    return None
 
 
 def main():
-
-    # optimize_neural_net()
+    optimize_neural_net()
     optimization_problems()
+
 
 if __name__ == '__main__':
     main()

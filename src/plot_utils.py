@@ -107,3 +107,51 @@ def plot_model_family_learning_curves(model_family, algo_list, iter_based=False,
             plt.savefig(figure_path+'/'+str(algo.model_family)+'.png')
     plt.close()
     return None
+
+
+
+def plot_opt_prob_curves(detail_df, plot_group, line_group, x_col, y_col, figure_action='show', figure_path='figures/lc', file_name=None):
+    color_list = ['b','g','r','c','m','y','k','w']
+    marker_list = ['x', '^', 'o', 's'] * 2 #make it match the length of the color list
+    f, axarr = plt.subplots(1, detail_df[plot_group].nunique(), figsize=(15,5))
+    # x_tick_marks = np.arange(problem_df[selected_x_col].nunique())
+    # y_tick_marks = np.linspace(start=min(problem_df[]), stop=, num=10)
+    # plt.setp(axarr, xticks=tick_marks, xticklabels=classes, yticks=tick_marks, yticklabels=classes)
+    i = 0
+    
+    for problem_name, problem_contents in detail_df.groupby(plot_group):
+        axarr[i].set_title(str(problem_name.title()))
+
+        axarr[i].set_xticks(np.linspace(min(detail_df[x_col]), max(detail_df[x_col]), detail_df[x_col].nunique()))
+
+        y_col_label = ' '.join([x.title() for x in y_col.split('_')])
+        x_col_label = ' '.join([x.title() for x in x_col.split('_')])
+
+        axarr[i].set(xlabel=x_col_label, ylabel=y_col_label)
+
+        # axarr[i].legend(loc='best')
+        #a new subplot is generated in each iteration
+        j = 0
+        for model_name, model_contents in problem_contents.groupby(line_group):
+            line_marker = marker_list[j]
+            line_color = color_list[j]
+            x_val = model_contents[x_col].values
+            y_val = model_contents[y_col].values
+            axarr[i].plot(x_val, y_val, '-', color=line_color, marker=line_marker, label=model_name.upper())    
+            axarr[i].legend(loc='best')
+            j += 1
+        i += 1
+
+    plt.tight_layout()
+
+    if figure_action == 'show':
+        plt.show()
+    elif figure_action == 'save':
+        if not os.path.exists(figure_path):
+            os.makedirs(figure_path)
+        if file_name:
+            plt.savefig(figure_path+'/'+file_name+'.png')
+        else:
+            plt.savefig(figure_path+'/'+'plot.png')
+    plt.close()
+    return None
